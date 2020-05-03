@@ -123,7 +123,7 @@ float heatindex;
 //#include <CarrierHeatpumpIR.h>
 //#include <MideaHeatpumpIR.h>
 //#include <MitsubishiHeatpumpIR.h>
-#include <SamsungHeatpumpIR.h>
+#include <SamsungHeatpumpIR.h> // sketch tested with version 1.0.15, see http://librarymanager#HeatpumpIR by Toni Arte
 //#include <SharpHeatpumpIR.h>
 //#include <DaikinHeatpumpIR.h>
 
