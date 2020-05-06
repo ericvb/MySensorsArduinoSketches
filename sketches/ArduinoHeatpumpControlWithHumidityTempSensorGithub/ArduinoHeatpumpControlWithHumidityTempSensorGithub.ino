@@ -74,7 +74,7 @@
 //#define DHTTYPE           DHT21     // DHT 21 (AM2301)
 
 // Sleep time between sensor updates (in milliseconds) to add to sensor delay (read from sensor data; typically: 1s)
-static const uint64_t UPDATE_INTERVAL = 60000; 
+static const uint64_t UPDATE_INTERVAL = 5000; // sensor does also IR communication, so set on 5 seconds
 
 // Force sending an update of the temperature after n sensor reads, so a controller showing the
 // timestamp of the last update doesn't show something like 3 hours in the unlikely case, that
