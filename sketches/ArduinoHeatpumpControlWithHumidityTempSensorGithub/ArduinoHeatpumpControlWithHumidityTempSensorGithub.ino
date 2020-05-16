@@ -26,6 +26,12 @@
  * Version 2.3 - Eric Van Bocxlaer - adding the Air Humidity Sensor - DHT - sketch based on the work of cnerone and others: https://raw.githubusercontent.com/cnerone/MySensorsArduinoExamples/master/examples/DhtTemperatureAndHumiditySensor/DhtTemperatureAndHumiditySensor.ino
  *                                 - used smartSleep to replace wait() and sleep()  
  *                                 - correction code working with the offsets
+ * Version 2.4 - Eric Van Bocxlaer - correction states send back to home assistant, is expecting text values and not numeric values
+ *                                   REMARK: This sketch is using a modified SamsungHeatpumpIR.cpp file in the HeatpumpIR library, see http://librarymanager#HeatpumpIR by Toni Arte
+ *                                           This because my specific model of Samsung AQV12MSAN didn't work with the default code.
+ *                                           I will add these modifed files to this repo in in anticipation of a change of the main library from Toni.
+ *                                           These modified files will still work with the default supported Samsung airco's!
+ * 
  * DESCRIPTION
  * Heatpump controller + humidity and temperature sensor DHT
  */
@@ -60,12 +66,12 @@
 // following hex codes are dummy hex codes, replace by your hexcodes (see the link above how to generate)
 //#define MY_SIGNING_NODE_WHITELISTING {{.nodeId = 0,.serial = {0x99,0x88,0x77,0x66,0x55,0x44,0x33,0x22,0x11}},{.nodeId = 1,.serial = {0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99}}}
 
-#include <MySensors.h> // sketch tested with version 2.3.2, see http://librarymanager#MySensors
+#include <MySensors.h> // sketch tested with version 2.3.2, see http://librarymanager/all#MySensors
 #include <Adafruit_Sensor.h> // Official "Adafruit Unified Sensor" by Adafruit (tested on version 1.1.1)  http://librarymanager/all#adafruit
 #include <DHT_U.h> // Official *DHT Sensor library* by Adafruit (tested on version 1.3.8)  http://librarymanager/all#dht
 
 #define SENSOR_NAME "Heatpump Sensor and Humidity-Temperature sensor"
-#define SENSOR_VERSION "2.3"
+#define SENSOR_VERSION "2.4"
 
 // ********************************************************DTH-11 sensor defines and variables*****************************************************************************
 // Uncomment the type of sensor in use:
@@ -74,7 +80,7 @@
 //#define DHTTYPE           DHT21     // DHT 21 (AM2301)
 
 // Sleep time between sensor updates (in milliseconds) to add to sensor delay (read from sensor data; typically: 1s)
-static const uint64_t UPDATE_INTERVAL = 5000; // sensor does also IR communication, so set on 5 seconds
+static const uint64_t UPDATE_INTERVAL = 5000; 
 
 // Force sending an update of the temperature after n sensor reads, so a controller showing the
 // timestamp of the last update doesn't show something like 3 hours in the unlikely case, that
@@ -127,7 +133,7 @@ float heatindex;
 //#include <SharpHeatpumpIR.h>
 //#include <DaikinHeatpumpIR.h>
 
-//Some global variables to hold the states
+//Some global variables to hold the numeric states sent to the airco unit
 int POWER_STATE;
 int TEMP_STATE;
 int FAN_STATE;
@@ -135,10 +141,15 @@ int MODE_STATE;
 int VDIR_STATE;
 int HDIR_STATE;
 
+//Some global variables to hold the text states sent to the home assistant controller
+String FAN_STATE_TXT;  // possible values ("Min", "Normal", "Max", "Auto")
+String MODE_STATE_TXT; // possible values ("Off", "HeatOn", "CoolOn", or "AutoChangeOver")
+
+
 IRSenderPWM irSender(IR_PIN);
 
 //Change to your Heatpump
-HeatpumpIR *heatpumpIR = new SamsungAQVHeatpumpIR();
+HeatpumpIR *heatpumpIR = new SamsungAQV12MSANHeatpumpIR();
 /*
 new PanasonicDKEHeatpumpIR()
 new PanasonicJKEHeatpumpIR()
@@ -253,9 +264,13 @@ void setup() {
 void loop() {
   // put your main code here, to run repeatedly:
   if (!initialValueSent) {
-    send(msgHVACSetPointC.set(20));
-    send(msgHVACSpeed.set("Auto"));
-    send(msgHVACFlowState.set("Off"));
+    FAN_STATE_TXT = "Auto"; // default fan start state
+    TEMP_STATE = 20; // default start temperature
+    MODE_STATE_TXT = "Off"; // default mode state
+    
+    send(msgHVACSetPointC.set(TEMP_STATE));
+    send(msgHVACSpeed.set(FAN_STATE_TXT.c_str()));
+    send(msgHVACFlowState.set(MODE_STATE_TXT.c_str()));
 
     initialValueSent = true;
   }
@@ -359,6 +374,7 @@ void receive(const MyMessage &message) {
       else if(recvData.equalsIgnoreCase("min")) FAN_STATE = 1;
       else if(recvData.equalsIgnoreCase("normal")) FAN_STATE = 2;
       else if(recvData.equalsIgnoreCase("max")) FAN_STATE = 3;
+      FAN_STATE_TXT = recvData;        
     break;
 
     case V_HVAC_SETPOINT_COOL:
@@ -384,6 +400,7 @@ void receive(const MyMessage &message) {
       else if (recvData.equalsIgnoreCase("off")){
         POWER_STATE = 0;
       }
+      MODE_STATE_TXT = recvData;
       break;
   }
   sendHeatpumpCommand();
@@ -391,12 +408,19 @@ void receive(const MyMessage &message) {
 }
 
 void sendNewStateToGateway() {
+  Serial.println("Status update send to HA:");
+  Serial.println("*************************");
+  Serial.println("Mode = " + MODE_STATE_TXT + "(" + (String)MODE_STATE + ")");
+  Serial.println("Fan = " + FAN_STATE_TXT + "(" + (String)FAN_STATE + ")");
+  Serial.println("Temp = " + (String)TEMP_STATE);
+  send(msgHVACFlowState.set(MODE_STATE_TXT.c_str()));
+  send(msgHVACSpeed.set(FAN_STATE_TXT.c_str()));
   send(msgHVACSetPointC.set(TEMP_STATE));
-  send(msgHVACSpeed.set(FAN_STATE));
-  send(msgHVACFlowState.set(MODE_STATE));
 }
 
 void sendHeatpumpCommand() {
+  Serial.println("Heatpump commands send to airco:");
+  Serial.println("********************************");
   Serial.println("Power = " + (String)POWER_STATE);
   Serial.println("Mode = " + (String)MODE_STATE);
   Serial.println("Fan = " + (String)FAN_STATE);
