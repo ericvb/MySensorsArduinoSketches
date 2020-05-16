@@ -1,0 +1,2 @@
+- install the library HeatpumpIR from Toni.
+- go to Documents/Arduino/libraries/HeatpumpIR, take these files and copy them in this folder
