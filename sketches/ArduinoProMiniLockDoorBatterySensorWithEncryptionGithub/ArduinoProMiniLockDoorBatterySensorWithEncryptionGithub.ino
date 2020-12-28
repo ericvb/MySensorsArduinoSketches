@@ -29,6 +29,13 @@
  *                                 - wake up by timer each 7 days for battery status
  *                                 - Changed sketchinfo name from 'Binary Door Sensor' to 'Door Senor' because name was double in the controller Home Assistant
  * Version 1.4 - Eric Van Bocxlaer - Adding node-to-node communication for sending also status to LCD node
+ * Version 1.5 - Eric Van Bocxlaer - deleting node to node communication code because not using anymore LCD node
+ *                                 - lowering radio baudrate to 9600 baud and set TX power to 12dBm to get more range
+ * Version 1.6 - Eric Van Bocxlaer - changing the original sleep(5) in the loop (Short delay to allow buttons to properly settle) to a wait(1000)
+ *                                   in order trying to increase stability (pro mini 1MHz internal needs some time to stabilize) and reliability of the radio connection.
+ *                                   Drawback, the node will consume a little more power...
+ *                                 - adding retries in sending the message to the gateway in an attempt to increase the delivery reliability
+ *                                 - adding statistics about radio TX and TX errors 
  * 
  * DESCRIPTION
  *
@@ -36,6 +43,18 @@
  * Connect button or door/window reed switch between 
  * digitial I/O pin 3 (BUTTON_PIN below) and GND.
  * http://www.mysensors.org/build/binary
+ * 
+ * Used IDE configuration in menu Tools
+ * Board: ATmega328
+ * Clock: Internal 1MHz
+ * BOD: BOD 1.8V
+ * EEPROM: EEPROM retained
+ * Compiler LTO: LTO disabled
+ * Variant: 328P / 328PA
+ * Bootloader: Yes (UART0)
+ * 
+ * When programming the bootloader, use
+ * Programmer: Arduino as ISP (MiniCore)
  */
 
 // Enable debug prints
@@ -50,6 +69,9 @@
 #define MY_RFM69_FREQUENCY RFM69_868MHZ // Set your frequency here
 #define MY_IS_RFM69HW // Omit if your RFM is not "H"
 #define MY_RFM69_NEW_DRIVER
+#define MY_RFM69_SPI_SPEED (1000000ul)  // on this 1MHZ arduino node, lower the SPI speed to the same speed
+#define MY_RFM69_TX_POWER_DBM (12) // set starting ATC TX power to 12dBm to get more range
+#define MY_RFM69_MODEM_CONFIGURATION RFM69_FSK_BR9_6_FD19_2  // 9600 baud rate: see https://www.mysensors.org/apidocs/group__RFM69SettingGrpPub.html#gaf1455cd3427c9dc4c4564542c3dafc16
 
 //enable radio communication encryption
 // more information can be found on https://forum.mysensors.org/topic/10382/security-signing-messages-and-encryption-of-messages-a-guide-or-more-a-summary-of-my-tests?_=1588348189475
@@ -68,22 +90,29 @@
 // following hex codes are dummy hex codes, replace by your hexcodes (see the link above how to generate)
 //#define MY_SIGNING_NODE_WHITELISTING {{.nodeId = 0,.serial = {0x99,0x88,0x77,0x66,0x55,0x44,0x33,0x22,0x11}},{.nodeId = 1,.serial = {0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99}}}
 
+#define MY_INDICATION_HANDLER // we will use our own indication handler to send radio rx/ts statistics of this node
+
 #include <MySensors.h> // sketch tested with version 2.3.2, see http://librarymanager#MySensors
 #include <Vcc.h>  // this lib can be found at: https://github.com/Yveaux/Arduino_Vcc and must be manually installed
 
 #define SENSOR_NAME "Door Sensor"
-#define SENSOR_VERSION "1.4"
-
-/*
- * Send the message not only to the gateway, but use also node-to-node communication
- */
-#define LCD_NODE_ID 100  // node id of the LCD sensor node
-#define LCD_CHILD_ID 3   //destination virtual child sensor of the LCD  node: used by the LCD node to know what to do on the LCD screen
+#define SENSOR_VERSION "1.6"
 
 #define CHILD_ID 1  // Each radio node can report data for up to 254 different child sensors. You are free to choose the child id yourself. 
                     // You should avoid using child-id 255 because it is used for things like sending in battery level and other (protocol internal) node specific information.
 #define BUTTON_PIN 3  // Arduino Digital I/O pin for button/reed switch
 #define SLEEP_A_WEEK 604800000 // 7 days
+
+#define MAX_TX_ATTEMPTS 5 // try to send 5 times in case of no hardware ack
+#define FAILED_TX_PAUSE 500 // take 500ms pause between retries
+
+// variables/defines used in my indication handler
+static uint32_t txOK = 0;
+static uint32_t txERR = 0;
+#define CHILD_ID_TX_OK 20
+#define CHILD_ID_TX_ERR 21
+MyMessage txOKmsg(CHILD_ID_TX_OK, V_VAR1);
+MyMessage txERRmsg(CHILD_ID_TX_ERR, V_VAR1);
 
 const float VccMin        = 2.0*0.6;  // Minimum expected Vcc level, in Volts. Example for 2xAA Alkaline.
 const float VccMax        = 2.0*1.5;  // Maximum expected Vcc level, in Volts. Example for 2xAA Alkaline.
@@ -98,7 +127,6 @@ int oldValue=-1;
 // V_TRIPPED : on ==> activated
 // V_TRIPPED : off ==> not activated
 MyMessage msg(CHILD_ID,V_TRIPPED);
-MyMessage msgLCD(LCD_CHILD_ID, V_STATUS);
 
 void setup()  
 {  
@@ -114,14 +142,17 @@ void presentation() {
   // Register binary input sensor to gw (they will be created as child devices)
   // You can use S_DOOR, S_MOTION or S_LIGHT here depending on your usage. 
   // If S_LIGHT is used, remember to update variable type you send in. See "msg" above.
-  present(CHILD_ID, S_DOOR);  
+  present(CHILD_ID, S_DOOR); 
+
+  present(CHILD_ID_TX_OK, S_CUSTOM);
+  present(CHILD_ID_TX_ERR, S_CUSTOM);   
 }
 
 //  Check if digital input has changed and send in new value
 void loop() 
 {
   // Short delay to allow buttons to properly settle
-  sleep(5);
+  wait(1000);
   
   getAndSendSensorValue();
 
@@ -137,17 +168,33 @@ void loop()
 
 void getAndSendSensorValue()
 {
+  bool sent = false;
+  int failedCounter = 0;
+  
   // Get the update value
   int value = digitalRead(BUTTON_PIN);
 
   if (value != oldValue) 
   {
-     // Value has changed from last transmission, send the updated value
-     // pin high ==> open contacts ==> door lock not closed, so V_TRIPPED not activated
-     // pin low ==> closed contacts ==> door lock closed, so V_TRIPPED activated
-     send(msg.set(value==HIGH ? 0 : 1)); 
-     send(msgLCD.setDestination(LCD_NODE_ID).set(value==HIGH ? 0 : 1)); // send also to LCD node
-     oldValue = value;
+    // do send retries only for the gateway
+    do
+    {
+      // Value has changed from last transmission, send the updated value
+      // pin high ==> open contacts ==> door lock not closed, so V_TRIPPED not activated
+      // pin low ==> closed contacts ==> door lock closed, so V_TRIPPED activated
+      sent = send(msg.set(value==HIGH ? 0 : 1)); 
+      if (!sent)
+      {
+        sleep(FAILED_TX_PAUSE); // 500ms
+        failedCounter++;
+      }
+    } while (!sent && failedCounter < MAX_TX_ATTEMPTS); // MAX_TX_ATTEMPTS: 5
+
+    // send the statistics
+    send(txOKmsg.set(txOK));
+    send(txERRmsg.set(txERR));
+
+    oldValue = value;
   }  
 }
 
@@ -158,6 +205,19 @@ void getAndSendBatteryLevel()
   {
     sendBatteryLevel(batteryPcnt);
     oldBatteryPcnt = batteryPcnt;
+  }
+}
+
+void indication(indication_t ind)
+{
+  switch (ind)
+  {
+    case INDICATION_TX:
+      txOK++;
+      break;
+    case INDICATION_ERR_TX:
+      txERR++;
+      break;
   }
 }
 
